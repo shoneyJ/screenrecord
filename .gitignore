@@ -1,0 +1,52 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+/bin/
+pkg/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go environment files
+.env
+.env.local
+
+# Test output
+*.coverprofile
+coverage.html
+coverage.out
+
+# Build output
+dist/
+build/
+
+# Debug files
+debug
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Delve debug binaries and logs
+__debug_bin*
+dlv.*
