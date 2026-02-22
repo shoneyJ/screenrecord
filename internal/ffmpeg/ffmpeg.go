@@ -5,107 +5,157 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strings"
+	"sync"
 	"time"
 )
 
-type fileInfo struct {
-	path string
-	mod  time.Time
-}
+var (
+	recordingMutex sync.Mutex
+	recordingCmd   *exec.Cmd
+	isRecording    bool
+)
 
-func getFileList(sourceDir string) ([]string, error) {
+func getScreenResolution() string {
+	fmt.Printf("🔍 Detecting screen resolution...\n")
+	fmt.Printf("   XDG_SESSION_TYPE: %s\n", os.Getenv("XDG_SESSION_TYPE"))
+	fmt.Printf("   WAYLAND_DISPLAY: %s\n", os.Getenv("WAYLAND_DISPLAY"))
 
-	entries, err := os.ReadDir(sourceDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
-	}
+	resolution := "1600x900"
 
-	var files []fileInfo
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		// Optional: only include certain file extensions
-		ext := filepath.Ext(entry.Name())
-		switch ext {
-		case ".mp4", ".mov", ".mkv", ".avi":
-			info, err := entry.Info()
-			if err != nil {
-				return nil, err
+	modes, err := os.ReadDir("/sys/class/drm")
+	if err == nil {
+		for _, m := range modes {
+			if m.IsDir() && (strings.HasSuffix(m.Name(), "-eDP-1") || strings.HasSuffix(m.Name(), "-HDMI-A-1")) {
+				modeData, err := os.ReadFile("/sys/class/drm/" + m.Name() + "/modes")
+				if err == nil && len(modeData) > 0 {
+					resolution = strings.TrimSpace(string(modeData))
+					break
+				}
 			}
-			files = append(files, fileInfo{
-				path: filepath.Join(sourceDir, entry.Name()),
-				mod:  info.ModTime(),
-			})
 		}
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].mod.Before(files[j].mod)
-	})
-
-	sortedPaths := make([]string, len(files))
-	for i, f := range files {
-		sortedPaths[i] = f.path
-	}
-
-	return sortedPaths, nil
-
+	fmt.Printf("📺 Using screen resolution: %s\n", resolution)
+	return resolution
 }
 
-func JoinListOfVideos(sourceDir string, outputFile string) error {
+func isWayland() bool {
+	sessionType := os.Getenv("XDG_SESSION_TYPE")
+	waylandDisplay := os.Getenv("WAYLAND_DISPLAY")
+	isWl := sessionType == "wayland" || waylandDisplay != ""
+	fmt.Printf("🔍 Is Wayland: %v (session=%s, display=%s)\n", isWl, sessionType, waylandDisplay)
+	return isWl
+}
 
-	files, err := getFileList(sourceDir)
-
-	if len(files) == 0 {
-		return fmt.Errorf("no input files provided")
-	}
-
-	listFile := "list.txt"
-	f, err := os.Create(listFile)
-
-	defer os.Remove(listFile)
-	defer f.Close()
-
-	for _, file := range files {
-		_, err := fmt.Fprintf(f, "file '%s'\n", file)
-		if err != nil {
-			return fmt.Errorf("failed to write to list file: %w", err)
-		}
-	}
-	f.Sync()
-
+func isNVIDIAAvailable() bool {
+	cmd := exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
+	output, err := cmd.Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading files: %v\n", err)
-		os.Exit(1)
+		fmt.Printf("🔍 No NVIDIA GPU detected\n")
+		return false
+	}
+	gpuName := strings.TrimSpace(string(output))
+	fmt.Printf("🔍 NVIDIA GPU detected: %s\n", gpuName)
+	return true
+}
+
+func RecordScreen(outputPath string) error {
+	recordingMutex.Lock()
+	if isRecording {
+		recordingMutex.Unlock()
+		return fmt.Errorf("already recording")
+	}
+	recordingMutex.Unlock()
+
+	outputFile := outputPath
+	if filepath.Ext(outputFile) == "" {
+		outputFile = filepath.Join(outputPath, fmt.Sprintf("recording_%s.mp4", time.Now().Format("2006-01-02_15-04-05")))
 	}
 
-	cmd := exec.Command(
-		"ffmpeg",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", listFile,
-		"-c:v", "h264_nvenc",
-		"-preset", "fast",
-		"-b:v", "5M",
-		"-c:a", "aac",
-		"-b:a", "192k",
-		outputFile,
-	)
+	dir := filepath.Dir(outputFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	screenRes := getScreenResolution()
+
+	var cmd *exec.Cmd
+	if isNVIDIAAvailable() {
+		fmt.Printf("📹 Recording with NVIDIA NVENC\n")
+		cmd = exec.Command(
+			"ffmpeg",
+			"-f", "x11grab",
+			"-framerate", "30",
+			"-draw_mouse", "1",
+			"-s", screenRes,
+			"-i", ":0.0+0,0",
+			"-c:v", "h264_nvenc",
+			"-preset", "fast",
+			"-pix_fmt", "yuv420p",
+			"-movflags", "+faststart",
+			"-y",
+			outputFile,
+		)
+	} else {
+		fmt.Printf("📹 Recording with CPU (libx264)\n")
+		cmd = exec.Command(
+			"ffmpeg",
+			"-f", "x11grab",
+			"-framerate", "30",
+			"-draw_mouse", "1",
+			"-s", screenRes,
+			"-i", ":0.0+0,0",
+			"-c:v", "libx264",
+			"-preset", "ultrafast",
+			"-tune", "zerolatency",
+			"-pix_fmt", "yuv420p",
+			"-movflags", "+faststart",
+			"-y",
+			outputFile,
+		)
+	}
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	fmt.Println("🔄 Merging videos from list.txt...")
-
-	// Run the command
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ffmpeg failed: %w", err)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start recording: %w", err)
 	}
 
-	fmt.Println("✅ Videos merged successfully into output.mp4")
+	recordingMutex.Lock()
+	recordingCmd = cmd
+	isRecording = true
+	recordingMutex.Unlock()
+
+	fmt.Printf("🔴 Recording started: %s\n", outputFile)
 	return nil
+}
+
+func StopRecording() error {
+	recordingMutex.Lock()
+	defer recordingMutex.Unlock()
+
+	if !isRecording || recordingCmd == nil {
+		return fmt.Errorf("not currently recording")
+	}
+
+	if recordingCmd.Process != nil {
+		if err := recordingCmd.Process.Signal(os.Interrupt); err != nil {
+			return fmt.Errorf("failed to stop recording: %w", err)
+		}
+		recordingCmd.Wait()
+	}
+
+	isRecording = false
+	recordingCmd = nil
+
+	fmt.Println("⏹ Recording stopped")
+	return nil
+}
+
+func IsRecording() bool {
+	recordingMutex.Lock()
+	defer recordingMutex.Unlock()
+	return isRecording
 }
