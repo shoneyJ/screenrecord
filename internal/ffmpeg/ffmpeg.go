@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,11 @@ type Display struct {
 	Name        string
 	Resolution  string
 	DisplayName string
+	X           int
+	Y           int
+	Width       int
+	Height      int
+	IsPrimary   bool
 }
 
 func getBaseDisplay() string {
@@ -38,7 +44,7 @@ func GetDisplays() []Display {
 	output, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("⚠️  Could not detect displays via xrandr: %v\n", err)
-		return []Display{{Name: "Default", Resolution: getScreenResolution(), DisplayName: baseDisplay + ".0+0,0"}}
+		return []Display{{Name: "Default", Resolution: getScreenResolution(), DisplayName: baseDisplay + ".0+0,0", IsPrimary: true}}
 	}
 
 	lines := strings.Split(string(output), "\n")
@@ -49,14 +55,22 @@ func GetDisplays() []Display {
 				name := fields[0]
 				res := ""
 				displayInput := ""
-				x, y := "0", "0"
+				x, y := 0, 0
+				width, height := 0, 0
+				isPrimary := strings.Contains(line, " primary ")
 
 				for i, f := range fields {
 					if strings.Contains(f, "x") && strings.Contains(f, "+") {
 						parts := strings.Split(f, "+")
 						res = parts[0]
 						if len(parts) >= 3 {
-							x, y = parts[1], parts[2]
+							x, _ = strconv.Atoi(parts[1])
+							y, _ = strconv.Atoi(parts[2])
+						}
+						dimParts := strings.Split(res, "x")
+						if len(dimParts) == 2 {
+							width, _ = strconv.Atoi(dimParts[0])
+							height, _ = strconv.Atoi(dimParts[1])
 						}
 						break
 					}
@@ -66,7 +80,13 @@ func GetDisplays() []Display {
 							parts := strings.Split(next, "+")
 							res = parts[0]
 							if len(parts) >= 3 {
-								x, y = parts[1], parts[2]
+								x, _ = strconv.Atoi(parts[1])
+								y, _ = strconv.Atoi(parts[2])
+							}
+							dimParts := strings.Split(res, "x")
+							if len(dimParts) == 2 {
+								width, _ = strconv.Atoi(dimParts[0])
+								height, _ = strconv.Atoi(dimParts[1])
 							}
 						}
 					}
@@ -74,13 +94,23 @@ func GetDisplays() []Display {
 
 				if res == "" {
 					res = getScreenResolution()
+					dimParts := strings.Split(res, "x")
+					if len(dimParts) == 2 {
+						width, _ = strconv.Atoi(dimParts[0])
+						height, _ = strconv.Atoi(dimParts[1])
+					}
 				}
-				displayInput = fmt.Sprintf("%s+%s,%s", baseDisplay, x, y)
+				displayInput = fmt.Sprintf("%s+%d,%d", baseDisplay, x, y)
 
 				displays = append(displays, Display{
 					Name:        name,
 					Resolution:  res,
 					DisplayName: displayInput,
+					X:           x,
+					Y:           y,
+					Width:       width,
+					Height:      height,
+					IsPrimary:   isPrimary,
 				})
 			}
 		}
@@ -91,6 +121,11 @@ func GetDisplays() []Display {
 			Name:        "Default",
 			Resolution:  getScreenResolution(),
 			DisplayName: baseDisplay + "+0,0",
+			X:           0,
+			Y:           0,
+			Width:       1600,
+			Height:      900,
+			IsPrimary:   true,
 		})
 	}
 
@@ -257,4 +292,79 @@ func IsRecording() bool {
 	recordingMutex.Lock()
 	defer recordingMutex.Unlock()
 	return isRecording
+}
+
+func GetDisplayFromPosition(winX, winY, winWidth, winHeight int) Display {
+	displays := GetDisplays()
+
+	centerX := winX + winWidth/2
+	centerY := winY + winHeight/2
+
+	for _, d := range displays {
+		if centerX >= d.X && centerX < d.X+d.Width &&
+			centerY >= d.Y && centerY < d.Y+d.Height {
+			fmt.Printf("🖥️  Window on display: %s (%s)\n", d.Name, d.Resolution)
+			return d
+		}
+	}
+
+	if len(displays) > 0 {
+		fmt.Printf("🖥️  Using default display: %s\n", displays[0].Name)
+		return displays[0]
+	}
+
+	return Display{
+		Name:        "Default",
+		Resolution:  "1600x900",
+		DisplayName: ":0+0,0",
+		X:           0,
+		Y:           0,
+		Width:       1600,
+		Height:      900,
+		IsPrimary:   true,
+	}
+}
+
+func GetPrimaryDisplay() Display {
+	displays := GetDisplays()
+	for _, d := range displays {
+		if d.IsPrimary {
+			return d
+		}
+	}
+	if len(displays) > 0 {
+		return displays[0]
+	}
+	return Display{
+		Name:        "Default",
+		Resolution:  "1600x900",
+		DisplayName: ":0+0,0",
+		X:           0,
+		Y:           0,
+		Width:       1600,
+		Height:      900,
+		IsPrimary:   true,
+	}
+}
+
+func GetDisplayByIndex(index int) Display {
+	displays := GetDisplays()
+	if index >= 0 && index < len(displays) {
+		return displays[index]
+	}
+	return GetPrimaryDisplay()
+}
+
+func GetDisplayCount() int {
+	return len(GetDisplays())
+}
+
+func GetDisplayIndex(name string) int {
+	displays := GetDisplays()
+	for i, d := range displays {
+		if d.Name == name {
+			return i
+		}
+	}
+	return 0
 }

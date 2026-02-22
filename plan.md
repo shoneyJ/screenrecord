@@ -57,10 +57,9 @@ Improve user experience with visual feedback.
 ### UI Mockup (Phase 2)
 
 ```
-───────────────────────
-│  DP1                    │
-│  [▶]       00:15   X │
-└───────────────────────
+_________________
+│  [▶] 00:15   X │
+└────────────────
 ```
 
 - [] window should not be resizable.
@@ -118,7 +117,7 @@ Quick access and better UX.
 ### Tasks
 
 - [ ] Add keyboard shortcut: Ctrl+R to toggle recording
-- [ ] Show desktop notification when recording saves
+- [ ] Shortcuts needs to be configurable, configuration can reside on ~/.config/<appname>/config.json
 
 ---
 

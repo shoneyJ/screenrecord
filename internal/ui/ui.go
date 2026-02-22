@@ -3,7 +3,10 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -17,19 +20,25 @@ import (
 	"github.com/shoneyj/screenrecord/internal/ffmpeg"
 )
 
+const (
+	windowWidth  = 120
+	windowHeight = 45
+	margin       = 10
+)
+
 var (
-	a             fyne.App
-	w             fyne.Window
-	timerLabel    *widget.Label
-	toggleBtn     *widget.Button
-	closeBtn      *widget.Button
-	displaySelect *widget.Select
-	stopTimer     chan struct{}
-	outputDir     string
-	displays      []ffmpeg.Display
-	selectedDisp  ffmpeg.Display
-	recordIcon    fyne.Resource
-	stopIcon      fyne.Resource
+	a                   fyne.App
+	w                   fyne.Window
+	timerLabel          *widget.Label
+	toggleBtn           *widget.Button
+	closeBtn            *widget.Button
+	stopTimer           chan struct{}
+	outputDir           string
+	recordIcon          fyne.Resource
+	stopIcon            fyne.Resource
+	displays            []ffmpeg.Display
+	currentDisplayIndex int
+	cfg                 *config.Config
 )
 
 func createRecordIcon() fyne.Resource {
@@ -43,7 +52,8 @@ func createStopIcon() fyne.Resource {
 }
 
 func StartApp() {
-	cfg, err := config.Load()
+	var err error
+	cfg, err = config.Load()
 	if err != nil {
 		homeDir, _ := os.UserHomeDir()
 		outputDir = filepath.Join(homeDir, "Videos")
@@ -52,9 +62,9 @@ func StartApp() {
 	}
 
 	displays = ffmpeg.GetDisplays()
-	if len(displays) > 0 {
-		selectedDisp = displays[0]
-	}
+
+	primary := ffmpeg.GetPrimaryDisplay()
+	currentDisplayIndex = ffmpeg.GetDisplayIndex(primary.Name)
 
 	recordIcon = createRecordIcon()
 	stopIcon = createStopIcon()
@@ -70,23 +80,7 @@ func StartApp() {
 
 	timerLabel = widget.NewLabel("00:00")
 	timerLabel.Alignment = fyne.TextAlignCenter
-
-	displayNames := make([]string, len(displays))
-	for i, d := range displays {
-		displayNames[i] = d.Name
-	}
-
-	displaySelect = widget.NewSelect(displayNames, func(s string) {
-		for _, d := range displays {
-			if d.Name == s {
-				selectedDisp = d
-				break
-			}
-		}
-	})
-	if len(displayNames) > 0 {
-		displaySelect.SetSelected(displayNames[0])
-	}
+	timerLabel.Hide()
 
 	toggleBtn = widget.NewButtonWithIcon("", recordIcon, toggleRecording)
 	toggleBtn.Importance = widget.LowImportance
@@ -96,16 +90,95 @@ func StartApp() {
 	})
 	closeBtn.Importance = widget.LowImportance
 
-	displayOrTimer := container.NewStack(displaySelect, timerLabel)
-	timerLabel.Hide()
+	content := container.NewBorder(nil, nil, toggleBtn, closeBtn, container.NewCenter(timerLabel))
 
-	topBar := container.NewBorder(nil, nil, toggleBtn, closeBtn, container.NewCenter(displayOrTimer))
-
-	w.SetContent(topBar)
-	w.Resize(fyne.NewSize(220, 45))
+	w.SetContent(content)
+	w.Resize(fyne.NewSize(windowWidth, windowHeight))
 	w.SetFixedSize(true)
-	w.CenterOnScreen()
+
+	setupKeyboardShortcuts()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		positionWindowAtDisplay(primary)
+	}()
+
 	w.ShowAndRun()
+}
+
+func setupKeyboardShortcuts() {
+	toggleShortcut := parseShortcut(cfg.Shortcuts.ToggleRecording)
+	w.Canvas().AddShortcut(toggleShortcut, func(_ fyne.Shortcut) {
+		toggleRecording()
+	})
+
+	cycleShortcut := parseShortcut(cfg.Shortcuts.CycleDisplay)
+	w.Canvas().AddShortcut(cycleShortcut, func(_ fyne.Shortcut) {
+		cycleDisplay()
+	})
+}
+
+func parseShortcut(shortcut string) *desktop.CustomShortcut {
+	parts := strings.Split(shortcut, "+")
+	var modifier fyne.KeyModifier
+	var key fyne.KeyName
+
+	for _, p := range parts {
+		switch strings.ToLower(p) {
+		case "ctrl":
+			modifier |= fyne.KeyModifierControl
+		case "shift":
+			modifier |= fyne.KeyModifierShift
+		case "alt":
+			modifier |= fyne.KeyModifierAlt
+		case "super":
+			modifier |= fyne.KeyModifierSuper
+		default:
+			key = fyne.KeyName(strings.ToUpper(p))
+		}
+	}
+
+	return &desktop.CustomShortcut{KeyName: key, Modifier: modifier}
+}
+
+func positionWindowAtDisplay(display ffmpeg.Display) {
+	x := display.X + display.Width - windowWidth - margin
+	y := display.Y + margin
+	moveWindowTo(x, y)
+}
+
+func moveWindowTo(x, y int) {
+	winID, err := getActiveWindowID()
+	if err != nil {
+		fmt.Printf("⚠️  Could not get window ID: %v\n", err)
+		return
+	}
+	exec.Command("xdotool", "windowmove", winID, strconv.Itoa(x), strconv.Itoa(y)).Run()
+}
+
+func getActiveWindowID() (string, error) {
+	cmd := exec.Command("xdotool", "getwindowfocus")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func cycleDisplay() {
+	if ffmpeg.IsRecording() {
+		return
+	}
+
+	displayCount := len(displays)
+	if displayCount <= 1 {
+		return
+	}
+
+	currentDisplayIndex = (currentDisplayIndex + 1) % displayCount
+	display := displays[currentDisplayIndex]
+	positionWindowAtDisplay(display)
+	fmt.Printf("🖥️  Switched to display: %s\n", display.Name)
 }
 
 func toggleRecording() {
@@ -117,14 +190,15 @@ func toggleRecording() {
 }
 
 func startRecording() {
-	err := ffmpeg.RecordScreen(outputDir, selectedDisp)
+	selectedDisplay := displays[currentDisplayIndex]
+
+	err := ffmpeg.RecordScreen(outputDir, selectedDisplay)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
 	toggleBtn.SetIcon(stopIcon)
-	displaySelect.Hide()
 	timerLabel.Show()
 	startTimer()
 }
@@ -138,10 +212,8 @@ func stopRecording() {
 
 	toggleBtn.SetIcon(recordIcon)
 	timerLabel.Hide()
-	displaySelect.Show()
 	stopTimerChan()
 
-	cfg := &config.Config{OutputDirectory: outputDir}
 	config.Save(cfg)
 }
 
