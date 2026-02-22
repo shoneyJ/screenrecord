@@ -16,6 +16,87 @@ var (
 	isRecording    bool
 )
 
+type Display struct {
+	Name        string
+	Resolution  string
+	DisplayName string
+}
+
+func getBaseDisplay() string {
+	display := os.Getenv("DISPLAY")
+	if display == "" {
+		return ":0"
+	}
+	return strings.Split(display, ".")[0]
+}
+
+func GetDisplays() []Display {
+	displays := []Display{}
+	baseDisplay := getBaseDisplay()
+
+	cmd := exec.Command("xrandr", "--query")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("⚠️  Could not detect displays via xrandr: %v\n", err)
+		return []Display{{Name: "Default", Resolution: getScreenResolution(), DisplayName: baseDisplay + ".0+0,0"}}
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, " connected") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				name := fields[0]
+				res := ""
+				displayInput := ""
+				x, y := "0", "0"
+
+				for i, f := range fields {
+					if strings.Contains(f, "x") && strings.Contains(f, "+") {
+						parts := strings.Split(f, "+")
+						res = parts[0]
+						if len(parts) >= 3 {
+							x, y = parts[1], parts[2]
+						}
+						break
+					}
+					if f == "primary" && i+1 < len(fields) {
+						next := fields[i+1]
+						if strings.Contains(next, "x") && strings.Contains(next, "+") {
+							parts := strings.Split(next, "+")
+							res = parts[0]
+							if len(parts) >= 3 {
+								x, y = parts[1], parts[2]
+							}
+						}
+					}
+				}
+
+				if res == "" {
+					res = getScreenResolution()
+				}
+				displayInput = fmt.Sprintf("%s+%s,%s", baseDisplay, x, y)
+
+				displays = append(displays, Display{
+					Name:        name,
+					Resolution:  res,
+					DisplayName: displayInput,
+				})
+			}
+		}
+	}
+
+	if len(displays) == 0 {
+		displays = append(displays, Display{
+			Name:        "Default",
+			Resolution:  getScreenResolution(),
+			DisplayName: baseDisplay + "+0,0",
+		})
+	}
+
+	return displays
+}
+
 func getScreenResolution() string {
 	fmt.Printf("🔍 Detecting screen resolution...\n")
 	fmt.Printf("   XDG_SESSION_TYPE: %s\n", os.Getenv("XDG_SESSION_TYPE"))
@@ -40,6 +121,15 @@ func getScreenResolution() string {
 	return resolution
 }
 
+func getDisplayInput() string {
+	display := os.Getenv("DISPLAY")
+	if display == "" {
+		display = ":0"
+	}
+	baseDisplay := strings.Split(display, ".")[0]
+	return baseDisplay + ".0+0,0"
+}
+
 func isWayland() bool {
 	sessionType := os.Getenv("XDG_SESSION_TYPE")
 	waylandDisplay := os.Getenv("WAYLAND_DISPLAY")
@@ -60,7 +150,7 @@ func isNVIDIAAvailable() bool {
 	return true
 }
 
-func RecordScreen(outputPath string) error {
+func RecordScreen(outputPath string, display Display) error {
 	recordingMutex.Lock()
 	if isRecording {
 		recordingMutex.Unlock()
@@ -78,7 +168,16 @@ func RecordScreen(outputPath string) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	screenRes := getScreenResolution()
+	screenRes := display.Resolution
+	displayInput := display.DisplayName
+	if displayInput == "" {
+		displayInput = getDisplayInput()
+	}
+	if screenRes == "" {
+		screenRes = getScreenResolution()
+	}
+
+	fmt.Printf("📺 Display: %s (%s)\n", display.Name, screenRes)
 
 	var cmd *exec.Cmd
 	if isNVIDIAAvailable() {
@@ -89,7 +188,7 @@ func RecordScreen(outputPath string) error {
 			"-framerate", "30",
 			"-draw_mouse", "1",
 			"-s", screenRes,
-			"-i", ":0.0+0,0",
+			"-i", displayInput,
 			"-c:v", "h264_nvenc",
 			"-preset", "fast",
 			"-pix_fmt", "yuv420p",
@@ -105,7 +204,7 @@ func RecordScreen(outputPath string) error {
 			"-framerate", "30",
 			"-draw_mouse", "1",
 			"-s", screenRes,
-			"-i", ":0.0+0,0",
+			"-i", displayInput,
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
