@@ -7,13 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/shoneyj/screenrecord/internal/config"
@@ -21,24 +20,30 @@ import (
 )
 
 const (
-	windowWidth  = 120
-	windowHeight = 45
-	margin       = 10
+	windowWidth    = 40
+	windowHeight   = 40
+	menuWidth      = 100
+	menuItemHeight = 30
+	menuGap        = 5
+	margin         = 10
 )
 
 var (
 	a                   fyne.App
 	w                   fyne.Window
-	timerLabel          *widget.Label
-	toggleBtn           *widget.Button
-	closeBtn            *widget.Button
-	stopTimer           chan struct{}
+	toggleIcon          *ClickableIcon
 	outputDir           string
 	recordIcon          fyne.Resource
 	stopIcon            fyne.Resource
+	gifIcon             fyne.Resource
 	displays            []ffmpeg.Display
 	currentDisplayIndex int
 	cfg                 *config.Config
+	isGifMode           bool
+	autoStopTimer       *time.Timer
+	timerMutex          sync.Mutex
+	menuVisible         bool
+	menuWindow          fyne.Window
 )
 
 func createRecordIcon() fyne.Resource {
@@ -49,6 +54,11 @@ func createRecordIcon() fyne.Resource {
 func createStopIcon() fyne.Resource {
 	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#6c757d"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>`
 	return fyne.NewStaticResource("stop", []byte(svg))
+}
+
+func createGifIcon() fyne.Resource {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#fd7e14"><circle cx="12" cy="12" r="10"/><text x="12" y="16" text-anchor="middle" font-size="10" font-weight="bold" fill="white">G</text></svg>`
+	return fyne.NewStaticResource("gif", []byte(svg))
 }
 
 func StartApp() {
@@ -66,8 +76,16 @@ func StartApp() {
 	primary := ffmpeg.GetPrimaryDisplay()
 	currentDisplayIndex = ffmpeg.GetDisplayIndex(primary.Name)
 
+	isGifMode = cfg.RecordingMode == "gif"
+
 	recordIcon = createRecordIcon()
 	stopIcon = createStopIcon()
+	gifIcon = createGifIcon()
+
+	initialIcon := recordIcon
+	if isGifMode {
+		initialIcon = gifIcon
+	}
 
 	a = app.New()
 
@@ -78,19 +96,15 @@ func StartApp() {
 		w = a.NewWindow("")
 	}
 
-	timerLabel = widget.NewLabel("00:00")
-	timerLabel.Alignment = fyne.TextAlignCenter
-	timerLabel.Hide()
+	toggleIcon = NewClickableIcon(initialIcon, toggleRecording, showRightClickMenu)
 
-	toggleBtn = widget.NewButtonWithIcon("", recordIcon, toggleRecording)
-	toggleBtn.Importance = widget.LowImportance
+	content := fyne.NewContainerWithoutLayout()
+	content.Resize(fyne.NewSize(windowWidth, windowHeight))
 
-	closeBtn = widget.NewButtonWithIcon("", theme.CancelIcon(), func() {
-		a.Quit()
-	})
-	closeBtn.Importance = widget.LowImportance
+	toggleIcon.Resize(fyne.NewSize(30, 30))
+	toggleIcon.Move(fyne.NewPos(5, 5))
 
-	content := container.NewBorder(nil, nil, toggleBtn, closeBtn, container.NewCenter(timerLabel))
+	content.Add(toggleIcon)
 
 	w.SetContent(content)
 	w.Resize(fyne.NewSize(windowWidth, windowHeight))
@@ -106,6 +120,97 @@ func StartApp() {
 	w.ShowAndRun()
 }
 
+func showRightClickMenu(e *fyne.PointEvent) {
+	if menuVisible {
+		hideMenu()
+		return
+	}
+	showMenu()
+}
+
+func getWindowPosition() (int, int, error) {
+	cmd := exec.Command("xdotool", "getwindowfocus", "getwindowgeometry", "--shell")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	var x, y int
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "X=") {
+			x, _ = strconv.Atoi(strings.TrimPrefix(line, "X="))
+		} else if strings.HasPrefix(line, "Y=") {
+			y, _ = strconv.Atoi(strings.TrimPrefix(line, "Y="))
+		}
+	}
+	return x, y, nil
+}
+
+func showMenu() {
+	mainX, mainY, err := getWindowPosition()
+	if err != nil {
+		fmt.Printf("Could not get window position: %v\n", err)
+		return
+	}
+
+	menuVisible = true
+
+	modeLabel := "GIF Mode"
+	if isGifMode {
+		modeLabel = "Video Mode"
+	}
+
+	drv := fyne.CurrentApp().Driver()
+	if d, ok := drv.(desktop.Driver); ok {
+		menuWindow = d.CreateSplashWindow()
+	} else {
+		menuWindow = a.NewWindow("")
+	}
+
+	modeBtn := widget.NewButton(modeLabel, func() {
+		hideMenu()
+		toggleMode()
+	})
+	modeBtn.Importance = widget.LowImportance
+
+	quitBtn := widget.NewButton("Quit", func() {
+		a.Quit()
+	})
+	quitBtn.Importance = widget.LowImportance
+
+	menuHeight := float32(2 * menuItemHeight)
+	content := fyne.NewContainerWithoutLayout()
+	content.Resize(fyne.NewSize(menuWidth, menuHeight))
+	modeBtn.Resize(fyne.NewSize(menuWidth, menuItemHeight))
+	modeBtn.Move(fyne.NewPos(0, 0))
+	quitBtn.Resize(fyne.NewSize(menuWidth, menuItemHeight))
+	quitBtn.Move(fyne.NewPos(0, menuItemHeight))
+	content.Add(modeBtn)
+	content.Add(quitBtn)
+
+	menuWindow.SetContent(content)
+	menuWindow.Resize(fyne.NewSize(menuWidth, menuHeight))
+	menuWindow.SetFixedSize(true)
+	menuWindow.Show()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		menuX := mainX
+		menuY := mainY + windowHeight + menuGap
+		winID, err := getActiveWindowID()
+		if err == nil {
+			exec.Command("xdotool", "windowmove", winID, strconv.Itoa(menuX), strconv.Itoa(menuY)).Run()
+		}
+	}()
+}
+
+func hideMenu() {
+	menuVisible = false
+	if menuWindow != nil {
+		menuWindow.Close()
+		menuWindow = nil
+	}
+}
+
 func setupKeyboardShortcuts() {
 	toggleShortcut := parseShortcut(cfg.Shortcuts.ToggleRecording)
 	w.Canvas().AddShortcut(toggleShortcut, func(_ fyne.Shortcut) {
@@ -115,6 +220,16 @@ func setupKeyboardShortcuts() {
 	cycleShortcut := parseShortcut(cfg.Shortcuts.CycleDisplay)
 	w.Canvas().AddShortcut(cycleShortcut, func(_ fyne.Shortcut) {
 		cycleDisplay()
+	})
+
+	modeShortcut := parseShortcut(cfg.Shortcuts.ToggleMode)
+	w.Canvas().AddShortcut(modeShortcut, func(_ fyne.Shortcut) {
+		toggleMode()
+	})
+
+	quitShortcut := parseShortcut(cfg.Shortcuts.QuitApp)
+	w.Canvas().AddShortcut(quitShortcut, func(_ fyne.Shortcut) {
+		a.Quit()
 	})
 }
 
@@ -182,11 +297,33 @@ func cycleDisplay() {
 }
 
 func toggleRecording() {
+	if menuVisible {
+		hideMenu()
+		return
+	}
 	if ffmpeg.IsRecording() {
 		stopRecording()
 	} else {
 		startRecording()
 	}
+}
+
+func toggleMode() {
+	if ffmpeg.IsRecording() {
+		return
+	}
+
+	isGifMode = !isGifMode
+	if isGifMode {
+		cfg.RecordingMode = "gif"
+		toggleIcon.SetIcon(gifIcon)
+		fmt.Println("📷 Switched to GIF mode")
+	} else {
+		cfg.RecordingMode = "video"
+		toggleIcon.SetIcon(recordIcon)
+		fmt.Println("📹 Switched to Video mode")
+	}
+	config.Save(cfg)
 }
 
 func startRecording() {
@@ -198,54 +335,67 @@ func startRecording() {
 		return
 	}
 
-	toggleBtn.SetIcon(stopIcon)
-	timerLabel.Show()
-	startTimer()
+	toggleIcon.SetIcon(stopIcon)
+
+	if isGifMode {
+		startAutoStopTimer()
+	}
+}
+
+func startAutoStopTimer() {
+	timerMutex.Lock()
+	defer timerMutex.Unlock()
+
+	autoStopTimer = time.AfterFunc(time.Duration(cfg.Gif.MaxDuration)*time.Second, func() {
+		if ffmpeg.IsRecording() {
+			fmt.Printf("⏱️ Auto-stopping GIF recording at %d seconds\n", cfg.Gif.MaxDuration)
+			fyne.Do(func() {
+				stopRecording()
+			})
+		}
+	})
+}
+
+func stopAutoStopTimer() {
+	timerMutex.Lock()
+	defer timerMutex.Unlock()
+
+	if autoStopTimer != nil {
+		autoStopTimer.Stop()
+		autoStopTimer = nil
+	}
 }
 
 func stopRecording() {
+	stopAutoStopTimer()
+
+	wasGifMode := isGifMode
+	outputPath := ffmpeg.GetOutputPath()
+
 	err := ffmpeg.StopRecording()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 
-	toggleBtn.SetIcon(recordIcon)
-	timerLabel.Hide()
-	stopTimerChan()
+	if wasGifMode && outputPath != "" {
+		fmt.Println("🔄 Converting to GIF...")
+		go func() {
+			gifPath, err := ffmpeg.ConvertToGif(outputPath, cfg.Gif.MaxWidth, cfg.Gif.Fps)
+			if err != nil {
+				fmt.Printf("Error converting to GIF: %v\n", err)
+			} else {
+				fmt.Printf("✅ GIF saved: %s\n", gifPath)
+			}
+		}()
+	}
+
+	if isGifMode {
+		toggleIcon.SetIcon(gifIcon)
+	} else {
+		toggleIcon.SetIcon(recordIcon)
+	}
 
 	config.Save(cfg)
 }
 
-func startTimer() {
-	stopTimer = make(chan struct{})
-	timerLabel.SetText("00:00")
-	go func() {
-		start := time.Now()
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				elapsed := time.Since(start)
-				mins := int(elapsed.Minutes())
-				secs := int(elapsed.Seconds()) % 60
-				text := fmt.Sprintf("%02d:%02d", mins, secs)
-				fyne.Do(func() {
-					timerLabel.SetText(text)
-				})
-			case <-stopTimer:
-				return
-			}
-		}
-	}()
-}
-
-func stopTimerChan() {
-	if stopTimer != nil {
-		close(stopTimer)
-		stopTimer = nil
-	}
-	timerLabel.SetText("")
-}

@@ -56,19 +56,15 @@ Improve user experience with visual feedback.
 
 ### UI Mockup (Phase 2)
 
-```
-_________________
-│  [▶] 00:15   X │
-└────────────────
-```
-
 - [] window should not be resizable.
 - [] No text is required.
 - [] Record and stop button should be togleable.
-- [] In a multi monitor setup, option to choose the display must be available.
-- [] Add draggable functionality to the window
-- [] Add logic to detect which monitor the window is on based on window position
+- [] keyboard shortcut moves the app to next display.
 - [] Store current display selection internally (not shown to user)
+
+### UI menu
+
+on right cliking the record icon, a floating menu completely detached to the icon should apprea 5 px below the record icon.
 
 ---
 
@@ -121,7 +117,16 @@ Quick access and better UX.
 
 ---
 
-## Phase 5: Future Enhancements (Nice to Have)
+## Phase 5: Gif mode
+
+- toggle between gif and video mode
+- in gif mode, screenrecording stops after 15 secs.
+- user can stop recording, before 15 secs.
+- a good quality gif is saved once, focus on good quality and not high quality.
+- icon of record shows 'G' to mention gif mode.
+- right click and toggle between gif / record mode.
+
+## Phase 6: Future Enhancements (Nice to Have)
 
 - System tray icon
 - Custom resolution selection

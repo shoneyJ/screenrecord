@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	recordingMutex sync.Mutex
-	recordingCmd   *exec.Cmd
-	isRecording    bool
+	recordingMutex    sync.Mutex
+	recordingCmd      *exec.Cmd
+	isRecording       bool
+	currentOutputPath string
 )
 
 type Display struct {
@@ -203,6 +204,8 @@ func RecordScreen(outputPath string, display Display) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	currentOutputPath = outputFile
+
 	screenRes := display.Resolution
 	displayInput := display.DisplayName
 	if displayInput == "" {
@@ -367,4 +370,55 @@ func GetDisplayIndex(name string) int {
 		}
 	}
 	return 0
+}
+
+func GetOutputPath() string {
+	recordingMutex.Lock()
+	defer recordingMutex.Unlock()
+	return currentOutputPath
+}
+
+func ConvertToGif(inputPath string, maxWidth, fps int) (string, error) {
+	outputPath := strings.TrimSuffix(inputPath, ".mp4") + ".gif"
+	palettePath := strings.TrimSuffix(inputPath, ".mp4") + "_palette.png"
+
+	scaleFilter := fmt.Sprintf("fps=%d,scale='min(%d,iw)':-2:flags=lanczos", fps, maxWidth)
+
+	// Pass 1: generate palette with stats_mode=full for accurate colors across all frames
+	fmt.Printf("🔄 Generating palette: %s\n", palettePath)
+	pass1 := exec.Command(
+		"ffmpeg",
+		"-i", inputPath,
+		"-vf", scaleFilter+",palettegen=max_colors=256:stats_mode=full",
+		"-y",
+		palettePath,
+	)
+	pass1.Stdout = os.Stdout
+	pass1.Stderr = os.Stderr
+
+	if err := pass1.Run(); err != nil {
+		return "", fmt.Errorf("failed to generate palette: %w", err)
+	}
+
+	// Pass 2: apply palette with dithering optimized for screen content
+	fmt.Printf("🔄 Converting to GIF: %s\n", outputPath)
+	pass2 := exec.Command(
+		"ffmpeg",
+		"-i", inputPath,
+		"-i", palettePath,
+		"-lavfi", scaleFilter+"[x];[x][1:v]paletteuse=dither=sierra2_4a",
+		"-y",
+		outputPath,
+	)
+	pass2.Stdout = os.Stdout
+	pass2.Stderr = os.Stderr
+
+	if err := pass2.Run(); err != nil {
+		os.Remove(palettePath)
+		return "", fmt.Errorf("failed to convert to GIF: %w", err)
+	}
+
+	os.Remove(palettePath)
+	fmt.Printf("✅ GIF created: %s\n", outputPath)
+	return outputPath, nil
 }
